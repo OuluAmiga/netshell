@@ -17,14 +17,14 @@ MORPHOS_LDFLAGS := -L../gg/lib
 
 # Target executable names
 TARGET_NATIVE := netshell
-TARGET_MORPHOS := netshell
+TARGET_MORPHOS := netshell_mos
 
 # Source files
 SOURCES := netshell.c
 
 .PHONY: all native morphos clean help
 
-all: morphos
+all: native
 
 # Native build target
 native: $(TARGET_NATIVE)

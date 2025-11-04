@@ -1,0 +1,31 @@
+# Compiled binary files
+netshell
+netshell_mos
+*.o
+*.so
+*.a
+*.exe
+*.out
+
+# Build artifacts
+build/
+dist/
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Temporary files
+*~
+*.tmp
+*.temp

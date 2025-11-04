@@ -38,11 +38,10 @@ void signal_handler(int sig) {
 }
 
 // Define socklen_t if not available on MorphOS
-#ifndef socklen_t
+// Define socklen_t if not available on MorphOS
 #ifdef MORPHOS
+#ifndef socklen_t
 typedef unsigned int socklen_t;
-#else
-typedef int socklen_t;
 #endif
 #endif
 
