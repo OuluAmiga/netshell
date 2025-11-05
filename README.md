@@ -56,7 +56,20 @@ telnet <server_ip> <port>
 - `netshell.c`: Main source code
 - `Makefile`: Build configuration
 - `README.md`: This file
+- `MUI/`: GUI application directory
 
 ## License
 
 This project is in the public domain.
+
+## GUI Version
+
+A GUI version of NetShell exists in the gui_version/ directory using Intuition (Classic Amiga GUI) rather than MUI.
+The GUI version features:
+- Start/Stop buttons for server control
+- Port configuration
+- Status display
+- Log output area
+- Settings persistence
+
+While MUI development is possible as shown in the MUI/ directory, the existing Intuition-based implementation is functional and recommended.

@@ -1,61 +1,53 @@
-# Makefile for NetShell - Network Shell for MorphOS and Linux
-# Supports cross-compilation for MorphOS using GCC in 'gg' directory
+# Makefile for NetShell Server and Client
 
-# Determine host architecture
-UNAME_S := $(shell uname -s)
-UNAME_M := $(shell uname -m)
+CC = gcc
+CFLAGS = -Wall -Wextra -O2
+LDFLAGS = 
 
-# Default values
-CC_NATIVE := gcc
-CFLAGS := -Wall -Wextra -O2 -std=gnu99
-LDFLAGS := 
+# For MorphOS target, use different settings
+ifdef MORPHOS
+CC = ppc-morphos-gcc
+CFLAGS += -noixemul
+LDFLAGS += -noixemul
+endif
 
-# MorphOS cross-compiler settings (for use when building ON MorphOS)
-MORPHOS_GCC := ../gg/bin/ppc-morphos-gcc
-MORPHOS_CFLAGS := -Wall -O2 -DMORPHOS -I../gg/include
-MORPHOS_LDFLAGS := -L../gg/lib
-
-# Target executable names
-TARGET_NATIVE := netshell
-TARGET_MORPHOS := netshell_mos
+# Target names
+SERVER_TARGET = netshell
+CLIENT_TARGET = netshell_client
 
 # Source files
-SOURCES := netshell.c
+SERVER_SRC = netshell.c
+CLIENT_SRC = netshell_client.c
 
-.PHONY: all native morphos clean help
+# Default target
+all: $(SERVER_TARGET) $(CLIENT_TARGET)
 
-all: native
+# Server build
+$(SERVER_TARGET): $(SERVER_SRC)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# Native build target
-native: $(TARGET_NATIVE)
+# Client build
+$(CLIENT_TARGET): $(CLIENT_SRC)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# MorphOS build target (only works when building ON MorphOS)
-morphos: $(TARGET_MORPHOS)
+# MorphOS build target
+morphos: CFLAGS += -DMORPHOS
+morphos: LDFLAGS += -DMORPHOS
+morphos: $(SERVER_SRC) $(CLIENT_SRC)
+	$(CC) $(CFLAGS) -DMORPHOS -o $(SERVER_TARGET) $(SERVER_SRC) $(LDFLAGS)
+	$(CC) $(CFLAGS) -DMORPHOS -o $(CLIENT_TARGET) $(CLIENT_SRC) $(LDFLAGS)
 
-# Build native executable
-$(TARGET_NATIVE): $(SOURCES)
-	$(CC_NATIVE) $(CFLAGS) $(SOURCES) -o $@ $(LDFLAGS)
+# Install to MorphOS
+install-morphos:
+	scp $(SERVER_TARGET) $(CLIENT_TARGET) morphos@192.168.1.136:/Work/Development/git/netshell/
 
-# Build MorphOS executable (only works when building ON MorphOS)
-$(TARGET_MORPHOS): $(SOURCES)
-	@if [ ! -f "$(MORPHOS_GCC)" ]; then \
-		echo "Error: MorphOS GCC not found at $(MORPHOS_GCC)"; \
-		echo "Make sure the 'gg' directory contains the MorphOS cross-compiler."; \
-		exit 1; \
-	fi
-	$(MORPHOS_GCC) $(MORPHOS_CFLAGS) $(SOURCES) -o $@ $(MORPHOS_LDFLAGS)
-
+# Clean build artifacts
 clean:
-	rm -f $(TARGET_NATIVE) $(TARGET_MORPHOS)
+	rm -f $(SERVER_TARGET) $(CLIENT_TARGET)
 
-help:
-	@echo "NetShell Makefile"
-	@echo "Usage:"
-	@echo "  make              - Build native version (default)"
-	@echo "  make native       - Build native version"
-	@echo "  make morphos      - Build for MorphOS using cross-compiler"
-	@echo "  make clean        - Remove build artifacts"
-	@echo "  make help         - Show this help message"
-	@echo ""
-	@echo "Cross-compilation requires the MorphOS GCC in the 'gg' directory."
-	@echo "Expected path: $(MORPHOS_GCC)"
+# Test connection
+test:
+	@echo "Testing connection to MorphOS..."
+	@echo ls | nc 192.168.1.136 2323
+
+.PHONY: all clean install-morphos test morphos

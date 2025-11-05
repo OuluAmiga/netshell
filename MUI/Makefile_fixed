@@ -1,0 +1,35 @@
+# Makefile for NetShell GUI Application
+# This Makefile is designed to be used on the MorphOS system itself
+
+# Compiler and tools
+CC = gcc
+STRIP = strip
+# On MorphOS, the SDK uses Amiga-style paths
+MORPHOSSDK = SDK:
+CFLAGS = -noixemul -I$(MORPHOSSDK)Local/Include -I$(MORPHOSSDK)Local/Include/inline -I$(MORPHOSSDK)Local/Include/mui -D__MORPHOS__
+# Use correct library names for MorphOS
+LDFLAGS = -L$(MORPHOSSDK)Local/Libs -L$(MORPHOSSDK)Local/Libs/mui -lauto
+
+# Target
+TARGET = netshell_gui
+SOURCES = gui_app.c
+
+# Build the application
+$(TARGET): $(SOURCES)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCES) $(LDFLAGS)
+	$(STRIP) $(TARGET)
+
+# Clean build artifacts
+clean:
+	rm -f $(TARGET)
+
+# Upload to MorphOS via netshell connection
+upload:
+	@echo "Files are already on MorphOS. To rebuild, run make directly on MorphOS."
+
+# Test connection to MorphOS netshell server
+test:
+	@echo "Testing connection to MorphOS netshell server..."
+	@echo ls | nc 192.168.1.136 2323
+
+.PHONY: clean upload test

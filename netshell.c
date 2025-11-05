@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 
 #ifdef MORPHOS
 #include <sys/time.h>
@@ -21,12 +22,15 @@
 #define INET_ADDRSTRLEN 16
 #endif
 #endif
+
 #include <sys/time.h>
-#include <sys/stat.h>
 
 #define DEFAULT_PORT 2324
 #define BACKLOG 10
 #define BUFFER_SIZE 1024
+#define MAX_PATH 512
+#define EXTENDED_PROTOCOL_MAGIC "NETSHELL_EXTENDED_V1\n"
+#define EXTENDED_ACK "EXTENDED_ACK\n"
 
 volatile sig_atomic_t server_running = 1;
 
@@ -38,27 +42,149 @@ void signal_handler(int sig) {
 }
 
 // Define socklen_t if not available on MorphOS
-// Define socklen_t if not available on MorphOS
 #ifdef MORPHOS
 #ifndef socklen_t
 typedef unsigned int socklen_t;
 #endif
 #endif
 
-// Function to handle each client connection
-void handle_client(int client_fd) {
+// Check if the connection should use extended protocol
+int check_extended_protocol(int socket_fd) {
+    char buffer[BUFFER_SIZE];
+    fd_set read_fds;
+    struct timeval timeout;
+
+    // Set up timeout for 2 seconds to receive the magic string
+    FD_ZERO(&read_fds);
+    FD_SET(socket_fd, &read_fds);
+    timeout.tv_sec = 2;
+    timeout.tv_usec = 0;
+
+    if (select(socket_fd + 1, &read_fds, NULL, NULL, &timeout) > 0) {
+        // Check if data is available
+        if (FD_ISSET(socket_fd, &read_fds)) {
+            // Peek at the data first to see if it matches the magic string
+            ssize_t bytes_read = recv(socket_fd, buffer, strlen(EXTENDED_PROTOCOL_MAGIC), MSG_PEEK);
+            
+            if (bytes_read >= (ssize_t)strlen(EXTENDED_PROTOCOL_MAGIC) - 1) {
+                // Now actually read the data
+                bytes_read = recv(socket_fd, buffer, strlen(EXTENDED_PROTOCOL_MAGIC), 0);
+                
+                if (bytes_read >= (ssize_t)strlen(EXTENDED_PROTOCOL_MAGIC) - 1) {
+                    buffer[bytes_read] = '\0';
+                    
+                    if (strncmp(buffer, EXTENDED_PROTOCOL_MAGIC, strlen(EXTENDED_PROTOCOL_MAGIC) - 1) == 0) {
+                        // Send ACK for extended protocol
+                        send(socket_fd, EXTENDED_ACK, strlen(EXTENDED_ACK), 0);
+                        return 1; // Extended protocol active
+                    }
+                }
+            }
+        }
+    }
+    
+    return 0; // Basic protocol
+}
+
+// Handle file transfer commands
+int handle_extended_commands(int socket_fd, const char* command) {
+    char cmd[MAX_PATH];
+    char filename[MAX_PATH];
+    char response[BUFFER_SIZE];
+    
+    // Parse the command
+    if (sscanf(command, "%s", cmd) == 1) {
+        if (strcmp(cmd, "SEND_FILE") == 0) {
+            char size_str[32];
+            if (sscanf(command, "%s %s %s", cmd, filename, size_str) == 3) {
+                long file_size = atol(size_str);
+                if (file_size > 0) {
+                    // Send ready message
+                    send(socket_fd, "READY\n", 6, 0);
+                    
+                    // Read the file data
+                    FILE *file = fopen(filename, "wb");
+                    if (file) {
+                        char *file_buffer = malloc(file_size);
+                        if (file_buffer) {
+                            ssize_t bytes_read = 0;
+                            ssize_t total_read = 0;
+                            
+                            while (total_read < file_size) {
+                                bytes_read = recv(socket_fd, 
+                                    file_buffer + total_read, 
+                                    file_size - total_read, 0);
+                                if (bytes_read <= 0) break;
+                                total_read += bytes_read;
+                            }
+                            
+                            if (fwrite(file_buffer, 1, file_size, file) == (size_t)file_size) {
+                                send(socket_fd, "OK\n", 3, 0);
+                            } else {
+                                send(socket_fd, "ERROR\n", 6, 0);
+                            }
+                            
+                            free(file_buffer);
+                        } else {
+                            send(socket_fd, "ERROR\n", 6, 0);
+                        }
+                        fclose(file);
+                    } else {
+                        send(socket_fd, "DENY\n", 5, 0);
+                    }
+                } else {
+                    send(socket_fd, "DENY\n", 5, 0);
+                }
+            } else {
+                send(socket_fd, "DENY\n", 5, 0);
+            }
+            return 1;
+        } else if (strcmp(cmd, "GET_FILE") == 0) {
+            if (sscanf(command, "%s %s", cmd, filename) == 2) {
+                struct stat file_stat;
+                if (stat(filename, &file_stat) == 0) {
+                    // Send file size
+                    snprintf(response, sizeof(response), "SIZE %ld\n", (long)file_stat.st_size);
+                    send(socket_fd, response, strlen(response), 0);
+                    
+                    // Open and send the file
+                    FILE *file = fopen(filename, "rb");
+                    if (file) {
+                        char *file_buffer = malloc(file_stat.st_size);
+                        if (file_buffer && fread(file_buffer, 1, file_stat.st_size, file) == (size_t)file_stat.st_size) {
+                            send(socket_fd, file_buffer, file_stat.st_size, 0);
+                        } else {
+                            // Send error if unable to read
+                            send(socket_fd, "ERROR\n", 6, 0);
+                        }
+                        if (file_buffer) free(file_buffer);
+                        fclose(file);
+                    } else {
+                        send(socket_fd, "ERROR\n", 6, 0);
+                    }
+                } else {
+                    send(socket_fd, "NOT_FOUND\n", 10, 0);
+                }
+            } else {
+                send(socket_fd, "ERROR\n", 6, 0);
+            }
+            return 1;
+        }
+    }
+    return 0; // Not a recognized extended command
+}
+
+// Function to handle each client connection in basic mode
+void handle_basic_client(int client_fd) {
     pid_t pid;
     int status;
     
-    // Simply redirect client I/O to shell I/O using dup2
-    // This is a simpler approach that avoids complex pipe handling
-    
     // Fork to create shell process (use vfork on MorphOS)
-    #ifdef MORPHOS
+#ifdef MORPHOS
     pid = vfork();
-    #else
+#else
     pid = fork();
-    #endif
+#endif
     
     if (pid == 0) {
         // Child process - set up shell
@@ -70,7 +196,7 @@ void handle_client(int client_fd) {
         // Close the original client socket since we've duplicated it
         close(client_fd);
         
-        #ifdef MORPHOS
+#ifdef MORPHOS
         // On MorphOS, use ksh from the development environment
         execl("Work:/Development/gg/bin/ksh", "ksh", NULL);
 #else
@@ -91,6 +217,33 @@ void handle_client(int client_fd) {
         // Fork failed
         perror("fork");
         close(client_fd);
+    }
+    
+    close(client_fd);
+}
+
+// Function to handle each client connection in extended mode
+void handle_extended_client(int client_fd) {
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+    
+    printf("Handling client in extended mode\n");
+    
+    // Main loop for extended protocol
+    while (1) {
+        bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_read <= 0) break;
+        
+        buffer[bytes_read] = '\0';
+        
+        // Check if it's an extended command first
+        if (handle_extended_commands(client_fd, buffer)) {
+            continue;
+        }
+        
+        // For any other commands, we'll just respond that we're in extended mode
+        // but the command isn't recognized
+        send(client_fd, "UNKNOWN_COMMAND\n", 16, 0);
     }
     
     close(client_fd);
@@ -161,7 +314,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
     
-    printf("NetShell server listening on port %d...\n", port);
+    printf("NetShell server listening on port %d (with extended protocol support)...\n", port);
     printf("Waiting for connections (Press Ctrl+C to stop)...\n");
     
     // Accept and handle connections
@@ -169,7 +322,7 @@ int main(int argc, char *argv[]) {
         // Periodically clean up zombie processes
         waitpid(-1, NULL, WNOHANG);
         
-        #ifdef MORPHOS
+#ifdef MORPHOS
         client_fd = accept(server_fd, (struct sockaddr*)&client_addr, (socklen_t*)&client_len);
 #else
         client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
@@ -184,7 +337,7 @@ int main(int argc, char *argv[]) {
             }
         }
         
-        #ifdef MORPHOS
+#ifdef MORPHOS
         // On MorphOS, use simpler approach for client IP
         printf("New connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 #else
@@ -195,21 +348,34 @@ int main(int argc, char *argv[]) {
 #endif
         
         // Fork to handle the client
-        #ifdef MORPHOS
+#ifdef MORPHOS
         pid = vfork();
-        #else
+#else
         pid = fork();
-        #endif
+#endif
         
         if (pid == 0) {
             // Child process - handle client
             close(server_fd);  // Close server socket in child
-            handle_client(client_fd);
-            #ifdef MORPHOS
+            
+            // Check if client wants extended protocol
+            int extended_mode = check_extended_protocol(client_fd);
+            
+            if (extended_mode) {
+                printf("Extended protocol activated for connection %s:%d\n", 
+                       inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+                handle_extended_client(client_fd);
+            } else {
+                printf("Basic protocol mode for connection %s:%d\n", 
+                       inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+                handle_basic_client(client_fd);
+            }
+            
+#ifdef MORPHOS
             _exit(0);  // Use _exit instead of exit in child after vfork
-            #else
+#else
             exit(0);  // Exit child process
-            #endif
+#endif
         } else if (pid > 0) {
             // Parent process - close client socket and continue accepting
             close(client_fd);
