@@ -18,7 +18,7 @@
 #define BUFFER_SIZE 4096
 #define MAX_PATH 512
 #define SESSION_DIR ".config/netshell"
-#define CONFIG_FILE ".config/netshell/config"
+#define DEFAULT_SESSION_FILE ".config/netshell/default"
 #define EXTENDED_PROTOCOL_MAGIC "NETSHELL_EXTENDED_V1\n"
 #define EXTENDED_ACK "EXTENDED_ACK\n"
 
@@ -30,7 +30,9 @@ struct SessionConfig {
     char hostname[256];
     int port;
     char username[64];
+    char description[256];
     time_t last_used;
+    int is_default;
 };
 
 // Function to establish connection
@@ -335,7 +337,9 @@ int save_session_config(const struct SessionConfig *config, const char *session_
     fprintf(file, "hostname=%s\n", config->hostname);
     fprintf(file, "port=%d\n", config->port);
     fprintf(file, "username=%s\n", config->username);
+    fprintf(file, "description=%s\n", config->description);
     fprintf(file, "last_used=%ld\n", config->last_used);
+    fprintf(file, "is_default=%d\n", config->is_default);
     
     fclose(file);
     return 0;
@@ -364,12 +368,88 @@ int load_session_config(struct SessionConfig *config, const char *session_name) 
             config->port = atoi(line + 5);
         } else if (strncmp(line, "username=", 9) == 0) {
             strncpy(config->username, line + 9, sizeof(config->username) - 1);
+        } else if (strncmp(line, "description=", 12) == 0) {
+            strncpy(config->description, line + 12, sizeof(config->description) - 1);
         } else if (strncmp(line, "last_used=", 10) == 0) {
             config->last_used = atol(line + 10);
+        } else if (strncmp(line, "is_default=", 11) == 0) {
+            config->is_default = atoi(line + 11);
         }
     }
     
     fclose(file);
+    return 0;
+}
+
+// Function to load default session name
+int get_default_session_name(char *session_name, size_t name_size) {
+    char home_dir[1024];
+    char default_path[1024];
+    
+    snprintf(home_dir, sizeof(home_dir), "%s", getenv("HOME"));
+    snprintf(default_path, sizeof(default_path), "%s/%s", home_dir, DEFAULT_SESSION_FILE);
+    
+    FILE *file = fopen(default_path, "r");
+    if (!file) {
+        return 1; // No default session set
+    }
+    
+    if (fgets(session_name, name_size, file)) {
+        session_name[strcspn(session_name, "\n")] = 0; // Remove newline
+        fclose(file);
+        return 0; // Success
+    }
+    
+    fclose(file);
+    return 1; // Error reading
+}
+
+// Function to set default session
+int set_default_session(const char *session_name) {
+    if (create_config_dir() != 0) {
+        return 1;
+    }
+    
+    char home_dir[1024];
+    char default_path[1024];
+    
+    snprintf(home_dir, sizeof(home_dir), "%s", getenv("HOME"));
+    snprintf(default_path, sizeof(default_path), "%s/%s", home_dir, DEFAULT_SESSION_FILE);
+    
+    FILE *file = fopen(default_path, "w");
+    if (!file) {
+        perror("fopen default session file");
+        return 1;
+    }
+    
+    fprintf(file, "%s\n", session_name);
+    fclose(file);
+    
+    // Update the session config to mark it as default
+    struct SessionConfig config;
+    if (load_session_config(&config, session_name) == 0) {
+        config.is_default = 1;
+        config.last_used = time(NULL);
+        save_session_config(&config, session_name);
+    }
+    
+    return 0;
+}
+
+// Function to unset default session
+int unset_default_session() {
+    char home_dir[1024];
+    char default_path[1024];
+    
+    snprintf(home_dir, sizeof(home_dir), "%s", getenv("HOME"));
+    snprintf(default_path, sizeof(default_path), "%s/%s", home_dir, DEFAULT_SESSION_FILE);
+    
+    // Remove the default session file
+    if (remove(default_path) != 0 && errno != ENOENT) {
+        perror("remove default session file");
+        return 1;
+    }
+    
     return 0;
 }
 
@@ -381,21 +461,44 @@ void list_sessions() {
     snprintf(home_dir, sizeof(home_dir), "%s", getenv("HOME"));
     snprintf(session_dir, sizeof(session_dir), "%s/%s", home_dir, SESSION_DIR);
     
+    // Check for default session
+    char default_session[256];
+    int has_default = (get_default_session_name(default_session, sizeof(default_session)) == 0);
+    
+    printf("Available sessions:\n");
+    
     // Use system command to list session files
     char command[1024];
-    snprintf(command, sizeof(command), "ls -1 %s 2>/dev/null", session_dir);
+    snprintf(command, sizeof(command), "ls -1 %s 2>/dev/null | grep -v 'default$'", session_dir);
     
     FILE *fp = popen(command, "r");
     if (fp) {
         char session_name[256];
-        printf("Available sessions:\n");
         while (fgets(session_name, sizeof(session_name), fp)) {
             session_name[strcspn(session_name, "\n")] = 0;
-            printf("  %s\n", session_name);
+            
+            // Load the session to check if it's default
+            struct SessionConfig config;
+            int is_default = 0;
+            if (load_session_config(&config, session_name) == 0) {
+                is_default = config.is_default;
+            }
+            
+            if (is_default || (has_default && strcmp(session_name, default_session) == 0)) {
+                printf("  %s (default)\n", session_name);
+            } else {
+                printf("  %s\n", session_name);
+            }
         }
         pclose(fp);
     } else {
-        printf("No sessions found.\n");
+        printf("  No sessions found.\n");
+    }
+    
+    if (has_default) {
+        printf("\nDefault session: %s\n", default_session);
+    } else {
+        printf("\nNo default session set.\n");
     }
 }
 
@@ -582,16 +685,26 @@ void interactive_mode(int sockfd) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s [options] <hostname> [port]\n", argv[0]);
-        fprintf(stderr, "       %s [options] -e <command> <hostname> [port]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [options] [hostname] [port]\n", argv[0]);
+        fprintf(stderr, "       %s [options] -e <command> [hostname] [port]\n", argv[0]);
         fprintf(stderr, "       %s <session_name> (use saved session)\n", argv[0]);
         fprintf(stderr, "Options:\n");
-        fprintf(stderr, "  -e, --eval <command>  Execute command and exit\n");
-        fprintf(stderr, "  -s, --session <name>  Use saved session\n");
-        fprintf(stderr, "  -l, --list            List saved sessions\n");
-        fprintf(stderr, "  -S, --save <name>     Save current connection as session\n");
-        fprintf(stderr, "Example: %s -e \"ls -la\" 192.168.1.136\n", argv[0]);
-        fprintf(stderr, "         %s myserver\n", argv[0]);
+        fprintf(stderr, "  -e, --eval <command>     Execute command and exit\n");
+        fprintf(stderr, "  -s, --session <name>     Use saved session\n");
+        fprintf(stderr, "  -l, --list               List saved sessions\n");
+        fprintf(stderr, "  -S, --save <name>        Save current connection as session\n");
+        fprintf(stderr, "  -d, --default <name>     Set default session\n");
+        fprintf(stderr, "  -D, --unset-default      Unset default session\n");
+        fprintf(stderr, "  -a, --address <addr>     Specify address (for save mode)\n");
+        fprintf(stderr, "  -p, --port <port>        Specify port (for save mode)\n");
+        fprintf(stderr, "  -u, --username <user>    Specify username (for save mode)\n");
+        fprintf(stderr, "  -desc, --description <desc>  Specify description (for save mode)\n");
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  %s -e \"ls -la\" 192.168.1.136 2324\n", argv[0]);
+        fprintf(stderr, "  %s myserver\n", argv[0]);
+        fprintf(stderr, "  %s -S myserver -a 192.168.1.136 -p 2324 -desc \"My server\"\n", argv[0]);
+        fprintf(stderr, "  %s -d myserver  (set default)\n", argv[0]);
+        fprintf(stderr, "  %s -e \"ls -la\"  (use default session)\n", argv[0]);
         return 1;
     }
 
@@ -602,6 +715,14 @@ int main(int argc, char *argv[]) {
     int eval_mode = 0;
     int save_session = 0;
     int list_sessions_flag = 0;
+    int set_default = 0;
+    int unset_default = 0;
+    char temp_session_name[256] = {0};
+    char temp_hostname[256] = {0};
+    char temp_username[64] = "unknown";
+    char temp_description[256] = "No description";
+    int temp_port = DEFAULT_PORT;
+    int has_temp_config = 0;
     int arg_idx = 1;
 
     // Parse command line options
@@ -630,29 +751,144 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             save_session = 1;
+            strncpy(temp_session_name, argv[arg_idx + 1], sizeof(temp_session_name) - 1);
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "-d") == 0 || strcmp(argv[arg_idx], "--default") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "Error: -d/--default requires a session name\n");
+                return 1;
+            }
+            set_default = 1;
             session_name = argv[arg_idx + 1];
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "-D") == 0 || strcmp(argv[arg_idx], "--unset-default") == 0) {
+            unset_default = 1;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-a") == 0 || strcmp(argv[arg_idx], "--address") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "Error: -a/--address requires an address\n");
+                return 1;
+            }
+            strncpy(temp_hostname, argv[arg_idx + 1], sizeof(temp_hostname) - 1);
+            has_temp_config = 1;
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "-p") == 0 || strcmp(argv[arg_idx], "--port") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "Error: -p/--port requires a port number\n");
+                return 1;
+            }
+            temp_port = atoi(argv[arg_idx + 1]);
+            if (temp_port <= 0 || temp_port > 65535) {
+                fprintf(stderr, "Invalid port: %s\n", argv[arg_idx + 1]);
+                return 1;
+            }
+            has_temp_config = 1;
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "-u") == 0 || strcmp(argv[arg_idx], "--username") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "Error: -u/--username requires a username\n");
+                return 1;
+            }
+            strncpy(temp_username, argv[arg_idx + 1], sizeof(temp_username) - 1);
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "-desc") == 0 || strcmp(argv[arg_idx], "--description") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "Error: --description requires a description\n");
+                return 1;
+            }
+            strncpy(temp_description, argv[arg_idx + 1], sizeof(temp_description) - 1);
             arg_idx += 2;
         } else if (argv[arg_idx][0] == '-') {
             fprintf(stderr, "Unknown option: %s\n", argv[arg_idx]);
             return 1;
         } else {
-            // This must be hostname or session name
-            if (!hostname && !session_name) {
-                hostname = argv[arg_idx];
+            // This must be hostname, session name, or port
+            if (!hostname && !session_name && !save_session) {
+                // Check if this looks like a session name (was given to -S) or just an address
+                // If save_session is 1, this should be treated as hostname for saving
+                if (save_session && strlen(temp_session_name) > 0) {
+                    strncpy(temp_hostname, argv[arg_idx], sizeof(temp_hostname) - 1);
+                    has_temp_config = 1;
+                } else {
+                    // Could be session name or hostname - check if it's a valid IP/hostname format
+                    hostname = argv[arg_idx];
+                }
+            } else if (hostname && port == DEFAULT_PORT) {
+                // Likely a port number
+                int parsed_port = atoi(argv[arg_idx]);
+                if (parsed_port > 0 && parsed_port <= 65535) {
+                    port = parsed_port;
+                } else {
+                    fprintf(stderr, "Invalid port: %s\n", argv[arg_idx]);
+                    return 1;
+                }
             }
             arg_idx++;
         }
     }
 
-    // List sessions if requested
+    // Handle operations that don't require connection
     if (list_sessions_flag) {
         list_sessions();
         return 0;
     }
+    
+    if (set_default) {
+        if (set_default_session(session_name) == 0) {
+            printf("Default session set to '%s'.\n", session_name);
+        } else {
+            fprintf(stderr, "Failed to set default session to '%s'\n", session_name);
+            return 1;
+        }
+        return 0;
+    }
+    
+    if (unset_default) {
+        if (unset_default_session() == 0) {
+            printf("Default session unset.\n");
+        } else {
+            fprintf(stderr, "Failed to unset default session\n");
+            return 1;
+        }
+        return 0;
+    }
 
-    // If no hostname provided but session name was given, treat first argument as session name
-    if (!hostname && !session_name && argc > 1) {
-        session_name = argv[1];
+    // If save session was requested, save the current configuration
+    if (save_session) {
+        if (strlen(temp_session_name) == 0) {
+            fprintf(stderr, "Error: Session name required for save operation\n");
+            return 1;
+        }
+        
+        struct SessionConfig config;
+        if (strlen(temp_hostname) > 0) {
+            strncpy(config.hostname, temp_hostname, sizeof(config.hostname) - 1);
+        } else {
+            fprintf(stderr, "Error: Hostname required for save operation\n");
+            return 1;
+        }
+        
+        config.port = temp_port;
+        strncpy(config.username, temp_username, sizeof(config.username) - 1);
+        strncpy(config.description, temp_description, sizeof(config.description) - 1);
+        config.last_used = time(NULL);
+        config.is_default = 0; // Don't automatically make it default
+        
+        if (save_session_config(&config, temp_session_name) == 0) {
+            printf("Session '%s' saved.\n", temp_session_name);
+        } else {
+            fprintf(stderr, "Failed to save session '%s'\n", temp_session_name);
+        }
+        return 0;
+    }
+
+    // Check for default session if no hostname or session specified
+    if (!hostname && !session_name) {
+        char default_session[256];
+        if (get_default_session_name(default_session, sizeof(default_session)) == 0) {
+            session_name = default_session;
+            printf("Using default session: %s\n", default_session);
+        }
     }
 
     // If using a session, load the configuration
@@ -673,11 +909,20 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Parse port if provided
-    if (argc > 2 && !eval_mode && !session_name) {
-        port = atoi(argv[2]);
-        if (port <= 0 || port > 65535) {
-            fprintf(stderr, "Invalid port: %s\n", argv[2]);
+    // If eval mode specified with no hostname, try to use default
+    if (eval_mode && !hostname && !session_name) {
+        char default_session[256];
+        if (get_default_session_name(default_session, sizeof(default_session)) == 0) {
+            struct SessionConfig config;
+            if (load_session_config(&config, default_session) == 0) {
+                hostname = config.hostname;
+                port = config.port;
+            } else {
+                fprintf(stderr, "Default session '%s' not found\n", default_session);
+                return 1;
+            }
+        } else {
+            fprintf(stderr, "No hostname or default session specified for eval mode\n");
             return 1;
         }
     }
@@ -687,25 +932,9 @@ int main(int argc, char *argv[]) {
         return execute_command(hostname, port, command);
     }
 
-    // If save session requested, save the current configuration
-    if (save_session && hostname) {
-        struct SessionConfig config;
-        strncpy(config.hostname, hostname, sizeof(config.hostname) - 1);
-        config.port = port;
-        strncpy(config.username, "unknown", sizeof(config.username) - 1);  // Could be obtained from system
-        config.last_used = time(NULL);
-        
-        if (save_session_config(&config, session_name) == 0) {
-            printf("Session '%s' saved.\n", session_name);
-        } else {
-            fprintf(stderr, "Failed to save session '%s'\n", session_name);
-        }
-        return 0;
-    }
-
     // If hostname is NULL at this point, we have an error
     if (!hostname) {
-        fprintf(stderr, "No hostname or session specified\n");
+        fprintf(stderr, "No hostname, session, or default session specified\n");
         return 1;
     }
 

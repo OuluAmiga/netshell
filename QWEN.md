@@ -40,8 +40,15 @@ echo "ls -la" | nc 192.168.1.136 2324
 
 # Session-based connections
 ./netshell_client -S myserver 192.168.1.136 [port]  # Save session
+./netshell_client -S myserver -a 192.168.1.136 -p 2324 -u username -desc "Description"  # Save with config
 ./netshell_client myserver                          # Use saved session
 ./netshell_client -l                                # List sessions
+./netshell_client -s myserver                       # Explicitly use session
+
+# Default session management
+./netshell_client -d myserver                       # Set myserver as default
+./netshell_client -D                                # Unset default session
+./netshell_client -e "ls"                           # Use default session (if set)
 
 # Interactive mode
 ./netshell_client 192.168.1.136 [port]
