@@ -38,6 +38,10 @@ echo "ls -la" | nc 192.168.1.136 2324
 ./netshell_client -e "ls -la" 192.168.1.136 [port]
 ./netshell_client --eval "command" hostname [port]
 
+# Execute command from file (new feature)
+./netshell_client -E script.sh 192.168.1.136 [port]
+./netshell_client --eval-file script.sh hostname [port]
+
 # Session-based connections
 ./netshell_client -S myserver 192.168.1.136 [port]  # Save session
 ./netshell_client -S myserver -a 192.168.1.136 -p 2324 -u username -desc "Description"  # Save with config

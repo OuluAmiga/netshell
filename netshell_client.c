@@ -276,22 +276,79 @@ int execute_command(const char* hostname, int port, const char* command) {
         return 1;
     }
 
-    // Receive and print output
+    // Receive and print output with timeout
     char response[BUFFER_SIZE];
     ssize_t bytes_read;
-    while ((bytes_read = recv(sockfd, response, sizeof(response) - 1, 0)) > 0) {
-        response[bytes_read] = '\0';
-        printf("%s", response);
-        fflush(stdout);
+    fd_set read_fds;
+    struct timeval timeout;
+    
+    while (1) {
+        FD_ZERO(&read_fds);
+        FD_SET(sockfd, &read_fds);
         
-        // Break if we get a prompt or if connection closes
-        if (strstr(response, "$ ") || strstr(response, "# ") || strstr(response, "> ")) {
+        // Set timeout to 2 seconds
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+        
+        int select_result = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
+        
+        if (select_result < 0) {
+            perror("select");
             break;
+        } else if (select_result == 0) {
+            // Timeout - no more data, break
+            break;
+        }
+        
+        if (FD_ISSET(sockfd, &read_fds)) {
+            bytes_read = recv(sockfd, response, sizeof(response) - 1, 0);
+            if (bytes_read > 0) {
+                response[bytes_read] = '\0';
+                printf("%s", response);
+                fflush(stdout);
+            } else if (bytes_read <= 0) {
+                // Connection closed or error
+                break;
+            }
         }
     }
 
     close(sockfd);
     return 0;
+}
+
+// Function to execute a command from file and return output
+int execute_command_from_file(const char* hostname, int port, const char* filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        perror("fopen");
+        return 1;
+    }
+
+    // Read the entire file content
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    char *command = malloc(file_size + 1);
+    if (!command) {
+        fclose(file);
+        perror("malloc");
+        return 1;
+    }
+
+    size_t bytes_read = fread(command, 1, file_size, file);
+    command[bytes_read] = '\0';
+    fclose(file);
+
+    // Remove trailing newline if present
+    if (bytes_read > 0 && command[bytes_read - 1] == '\n') {
+        command[bytes_read - 1] = '\0';
+    }
+
+    int result = execute_command(hostname, port, command);
+    free(command);
+    return result;
 }
 
 // Function to create config directory if it doesn't exist
@@ -450,6 +507,16 @@ int unset_default_session() {
         return 1;
     }
     
+    // Also update the session config to clear default flag
+    char session_name[256];
+    if (get_default_session_name(session_name, sizeof(session_name)) == 0) {
+        struct SessionConfig config;
+        if (load_session_config(&config, session_name) == 0) {
+            config.is_default = 0;
+            save_session_config(&config, session_name);
+        }
+    }
+    
     return 0;
 }
 
@@ -474,6 +541,7 @@ void list_sessions() {
     FILE *fp = popen(command, "r");
     if (fp) {
         char session_name[256];
+        int found_sessions = 0;
         while (fgets(session_name, sizeof(session_name), fp)) {
             session_name[strcspn(session_name, "\n")] = 0;
             
@@ -489,8 +557,13 @@ void list_sessions() {
             } else {
                 printf("  %s\n", session_name);
             }
+            found_sessions = 1;
         }
         pclose(fp);
+        
+        if (!found_sessions) {
+            printf("  No sessions found.\n");
+        }
     } else {
         printf("  No sessions found.\n");
     }
@@ -687,9 +760,11 @@ int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s [options] [hostname] [port]\n", argv[0]);
         fprintf(stderr, "       %s [options] -e <command> [hostname] [port]\n", argv[0]);
+        fprintf(stderr, "       %s [options] -E <file> [hostname] [port]  (eval from file)\n", argv[0]);
         fprintf(stderr, "       %s <session_name> (use saved session)\n", argv[0]);
         fprintf(stderr, "Options:\n");
         fprintf(stderr, "  -e, --eval <command>     Execute command and exit\n");
+        fprintf(stderr, "  -E, --eval-file <file>   Execute command from file and exit\n");
         fprintf(stderr, "  -s, --session <name>     Use saved session\n");
         fprintf(stderr, "  -l, --list               List saved sessions\n");
         fprintf(stderr, "  -S, --save <name>        Save current connection as session\n");
@@ -701,10 +776,11 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  -desc, --description <desc>  Specify description (for save mode)\n");
         fprintf(stderr, "Examples:\n");
         fprintf(stderr, "  %s -e \"ls -la\" 192.168.1.136 2324\n", argv[0]);
+        fprintf(stderr, "  %s -E script.sh 192.168.1.136 2324\n", argv[0]);
         fprintf(stderr, "  %s myserver\n", argv[0]);
         fprintf(stderr, "  %s -S myserver -a 192.168.1.136 -p 2324 -desc \"My server\"\n", argv[0]);
         fprintf(stderr, "  %s -d myserver  (set default)\n", argv[0]);
-        fprintf(stderr, "  %s -e \"ls -la\"  (use default session)\n", argv[0]);
+        fprintf(stderr, "  %s -e \"ls -la\"  (use default session if set)\n", argv[0]);
         return 1;
     }
 
@@ -712,7 +788,9 @@ int main(int argc, char *argv[]) {
     const char *hostname = NULL;
     const char *session_name = NULL;
     const char *command = NULL;
+    const char *command_file = NULL;
     int eval_mode = 0;
+    int eval_file_mode = 0;
     int save_session = 0;
     int list_sessions_flag = 0;
     int set_default = 0;
@@ -734,6 +812,14 @@ int main(int argc, char *argv[]) {
             }
             eval_mode = 1;
             command = argv[arg_idx + 1];
+            arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "-E") == 0 || strcmp(argv[arg_idx], "--eval-file") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "Error: -E/--eval-file requires a file argument\n");
+                return 1;
+            }
+            eval_file_mode = 1;
+            command_file = argv[arg_idx + 1];
             arg_idx += 2;
         } else if (strcmp(argv[arg_idx], "-s") == 0 || strcmp(argv[arg_idx], "--session") == 0) {
             if (arg_idx + 1 >= argc) {
@@ -887,7 +973,7 @@ int main(int argc, char *argv[]) {
         char default_session[256];
         if (get_default_session_name(default_session, sizeof(default_session)) == 0) {
             session_name = default_session;
-            printf("Using default session: %s\n", default_session);
+            //printf("Using default session: %s\n", default_session); // Comment out to reduce output
         }
     }
 
@@ -909,27 +995,45 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // If eval mode specified with no hostname, try to use default
-    if (eval_mode && !hostname && !session_name) {
-        char default_session[256];
-        if (get_default_session_name(default_session, sizeof(default_session)) == 0) {
-            struct SessionConfig config;
-            if (load_session_config(&config, default_session) == 0) {
-                hostname = config.hostname;
-                port = config.port;
+    // Handle eval modes
+    if (eval_mode && command) {
+        if (!hostname) {
+            char default_session[256];
+            if (get_default_session_name(default_session, sizeof(default_session)) == 0) {
+                struct SessionConfig config;
+                if (load_session_config(&config, default_session) == 0) {
+                    hostname = config.hostname;
+                    port = config.port;
+                } else {
+                    fprintf(stderr, "Default session '%s' not found\n", default_session);
+                    return 1;
+                }
             } else {
-                fprintf(stderr, "Default session '%s' not found\n", default_session);
+                fprintf(stderr, "No hostname or default session specified for eval mode\n");
                 return 1;
             }
-        } else {
-            fprintf(stderr, "No hostname or default session specified for eval mode\n");
-            return 1;
         }
+        return execute_command(hostname, port, command);
     }
 
-    // If eval mode specified, execute the command
-    if (eval_mode && command && hostname) {
-        return execute_command(hostname, port, command);
+    if (eval_file_mode && command_file) {
+        if (!hostname) {
+            char default_session[256];
+            if (get_default_session_name(default_session, sizeof(default_session)) == 0) {
+                struct SessionConfig config;
+                if (load_session_config(&config, default_session) == 0) {
+                    hostname = config.hostname;
+                    port = config.port;
+                } else {
+                    fprintf(stderr, "Default session '%s' not found\n", default_session);
+                    return 1;
+                }
+            } else {
+                fprintf(stderr, "No hostname or default session specified for eval-file mode\n");
+                return 1;
+            }
+        }
+        return execute_command_from_file(hostname, port, command_file);
     }
 
     // If hostname is NULL at this point, we have an error
